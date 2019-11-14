@@ -1,5 +1,6 @@
 [package]
 name = "rust-csv2beancount"
+description = "Convert csv files of transactions to beancount format"
 version = "0.1.0"
 authors = ["Alex Kursell <alexkursell@gmail.com>"]
 edition = "2018"
