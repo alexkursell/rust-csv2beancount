@@ -1,10 +1,9 @@
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
 use std::path::PathBuf;
 use structopt::StructOpt;
-use yaml_rust::YamlLoader;
+use serde::Deserialize;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -18,40 +17,47 @@ struct Opt {
     yaml_path: PathBuf,
 }
 
-#[derive(Debug)]
+
+
+#[derive(Debug, Deserialize)]
 struct YamlConfig {
-    delimiter: u8,
+    csv : Config,
+    transactions: Option<HashMap<String, TransactionRule>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
     currency: String,
     processing_account: String,
     default_account: String,
-    date_index: i64,
-    amount_in_index: i64,
-    amount_out_index: i64,
-    skip_lines: i64,
     date_format: String,
-    toggle_sign: bool,
-    description_index: i64,
-    transaction_rules: HashMap<String, TransactionRule>,
+    date: i64,
+    amount_in: i64,
+    amount_out: i64,
+    description: i64,
+    delimiter: Option<u8>,
+    skip: Option<i64>,
+    toggle_sign: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct TransactionRule {
     account: Option<String>,
     info: Option<String>,
 }
 
 #[derive(Debug)]
-struct Transaction {
+struct Transaction<'a> {
     date: String,
-    processing_account: String,
-    other_account: String,
-    currency: String,
+    processing_account: &'a str,
+    other_account: &'a str,
+    currency: &'a str,
     magnitude: f64,
-    description: String,
-    info: Option<String>,
+    description: &'a str,
+    info: Option<&'a str>,
 }
 
-impl std::fmt::Display for Transaction {
+impl<'a> std::fmt::Display for Transaction<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             fmt,
@@ -73,58 +79,19 @@ impl std::fmt::Display for Transaction {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::from_args();
 
-    let mut yaml_string = "".to_owned();
-    let mut yaml_file = std::fs::File::open(&opt.yaml_path)?;
-    let _ = yaml_file.read_to_string(&mut yaml_string)?;
-    let raw_yaml = YamlLoader::load_from_str(&yaml_string)?;
-    let raw_config = &raw_yaml[0]["csv"];
-    let raw_transactions = &raw_yaml[0]["transactions"];
-
-    let config = YamlConfig {
-        delimiter: raw_config["delimiter"]
-            .as_str()
-            .map_or(b',', |s| s.bytes().collect::<Vec<u8>>()[0]),
-        currency: raw_config["currency"].as_str().unwrap().into(),
-        processing_account: raw_config["processing_account"].as_str().unwrap().into(),
-        default_account: raw_config["default_account"].as_str().unwrap().into(),
-        date_index: raw_config["date"].as_i64().unwrap(),
-        amount_in_index: raw_config["amount_in"].as_i64().unwrap(),
-        amount_out_index: raw_config["amount_out"].as_i64().unwrap(),
-        skip_lines: raw_config["skip"].as_i64().unwrap_or(0),
-        date_format: raw_config["date_format"]
-            .as_str()
-            .unwrap_or("%m/%d/%Y")
-            .into(),
-        toggle_sign: raw_config["toggle_sign"].as_bool().unwrap_or(false),
-        description_index: raw_config["description"].as_i64().unwrap(),
-        transaction_rules: {
-            if let Some(transactions) = raw_transactions.as_hash() {
-                transactions
-                    .iter()
-                    .map(|(key, val)| {
-                        let key: String = key.as_str().unwrap().into();
-                        let val = TransactionRule {
-                            account: val["account"].as_str().map(|s| s.into()),
-                            info: val["info"].as_str().map(|s| s.into()),
-                        };
-                        (key, val)
-                    })
-                    .collect::<HashMap<String, TransactionRule>>()
-            } else {
-                HashMap::new()
-            }
-        },
-    };
-
+    let yaml_file = std::fs::File::open(&opt.yaml_path)?;
+    let root_config: YamlConfig = serde_yaml::from_reader(yaml_file)?;
+    let config = root_config.csv;
+    let transaction_rules = root_config.transactions;
     let csv_file = std::fs::File::open(opt.csv_path)?;
 
     let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(config.delimiter)
+        .delimiter(config.delimiter.unwrap_or(b','))
         .has_headers(false)
         .from_reader(csv_file);
 
     let mut first = true;
-    for result in rdr.records().skip(config.skip_lines as usize) {
+    for result in rdr.records().skip(config.skip.unwrap_or(0) as usize) {
         let record = result.unwrap();
 
         if first {
@@ -133,39 +100,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
         }
 
-        let description = &record[config.description_index as usize];
+        let description = &record[config.description as usize];
         let date =
-            NaiveDate::parse_from_str(&record[config.date_index as usize], &config.date_format)?;
+            NaiveDate::parse_from_str(&record[config.date as usize], &config.date_format)?;
 
         let t = Transaction {
             date: date.to_string(),
-            description: description.into(),
+            description,
             info: {
-                match config.transaction_rules.get(description) {
-                    Some(rule) => rule.info.clone(),
-                    None => None,
+                if let Some(rules) = transaction_rules.as_ref() {
+                    match rules.get(description) {
+                        Some(rule) => rule.info.as_ref().map(|s| s.as_str()),
+                        None => None,
+                    }
+                } else {
+                    None
                 }
             },
-            processing_account: config.processing_account.clone(),
-            other_account: config
-                .transaction_rules
-                .get(description)
-                .map(|r| r.account.clone().unwrap_or(config.default_account.clone()))
-                .unwrap_or(config.default_account.clone()),
+            processing_account: &config.processing_account,
+            other_account: {
+                let specific = {
+                    if let Some(rules) = transaction_rules.as_ref() {
+                        match rules.get(description) {
+                            Some(rule) => rule.account.as_ref(),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(acc) = specific {
+                    &acc
+                } else {
+                    &config.default_account
+                }
+            },
             magnitude: {
-                let in_amount = &record[config.amount_in_index as usize];
-                let out_amount = &record[config.amount_out_index as usize];
-                let toggle = if config.toggle_sign { -1.0 } else { 1.0 };
+                let in_amount = &record[config.amount_in as usize];
+                let out_amount = &record[config.amount_out as usize];
+                let toggle = if config.toggle_sign.is_some() && config.toggle_sign.unwrap() {
+                    -1.0
+                } else {
+                    1.0
+                };
 
                 if let Ok(amt) = in_amount.parse::<f64>() {
                     amt * toggle
                 } else if let Ok(amt) = out_amount.parse::<f64>() {
                     amt * toggle * -1.0
                 } else {
-                    panic!()
+                    Err(format!("Could not parse either in or out amounts for {}", description))?
                 }
             },
-            currency: config.currency.clone(),
+            currency: &config.currency,
         };
 
         println!("{}", t)
