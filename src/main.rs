@@ -61,13 +61,13 @@ impl<'a> std::fmt::Display for Transaction<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             fmt,
-            r#"{} * "{}" {}
+            r#"{} * "{}"{}
   {} {} {}
   {} {} {}"#,
             self.date,
             self.description,
             if let Some(info) = self.info {
-                format!(r#""{}""#, info)
+                format!(r#" "{}""#, info)
             } else {
                 "".into()
             },
